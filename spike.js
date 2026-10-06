@@ -19,7 +19,7 @@ function log(msg, cls) {
   const t = (performance.now() / 1000).toFixed(1).padStart(7);
   const line = `${t} ${msg}`;
   logLines.push(line);
-  if (logLines.length > 400) logLines.shift();
+  if (logLines.length > 3000) logLines.shift();
   const el = $('log');
   const span = document.createElement('div');
   span.textContent = line; if (cls) span.className = cls;
@@ -30,7 +30,12 @@ function log(msg, cls) {
 }
 setInterval(() => { if (logDirty) { store.set('spike.log', JSON.stringify(logLines.slice(-80))); logDirty = false; } }, 1000);
 window.addEventListener('error', (e) => log('window.error: ' + e.message, 'ng'));
-window.addEventListener('unhandledrejection', (e) => log('unhandledrejection: ' + (e.reason && (e.reason.stack || e.reason.message || e.reason)), 'ng'));
+let abortCount = 0;
+window.addEventListener('unhandledrejection', (e) => {
+  const r = e.reason;
+  if (r && r.name === 'AbortError') { abortCount++; if (abortCount === 1) log('unhandledrejection: AbortError（世代切替で旧Outputを破棄したときの想定内のエラー。以後は数えるだけ）'); e.preventDefault(); return; }
+  log('unhandledrejection: ' + (r && (r.stack || r.message || r)), 'ng');
+});
 
 // ---------------- 前回のセッション（クラッシュ・再読み込みの検出） ----------------
 (function showPrev() {
@@ -93,7 +98,7 @@ for (const v of variants) {
 // ---------------- S1-b ネイティブ再生 ----------------
 const v = $('v');
 let nativeUrl = null;
-for (const ev of ['loadedmetadata', 'canplay', 'playing', 'pause', 'waiting', 'stalled', 'seeking', 'seeked', 'ended', 'error', 'ratechange', 'emptied', 'abort']) {
+for (const ev of ['loadedmetadata', 'canplay', 'playing', 'pause', 'waiting', 'stalled', 'seeked', 'ended', 'error', 'ratechange', 'emptied', 'abort']) {
   v.addEventListener(ev, () => {
     let extra = '';
     if (ev === 'loadedmetadata') extra = ` duration=${v.duration} ${v.videoWidth}x${v.videoHeight}`;
@@ -270,12 +275,21 @@ class MsePlayer {
     this.stats.state = 'ready';
   }
   inBuffer(t) { const b = this.sb.buffered; for (let i = 0; i < b.length; i++) if (b.start(i) <= t + 0.05 && b.end(i) > t) return true; return false; }
-  async handleSeeking() {
+  // シークの合流：つまみのドラッグで seeking が連発しても、最後の位置から SEEK_DEBOUNCE_MS 経ってから1回だけ切り替える。
+  // （GOPが長いと、1世代の供給に数秒かかり、連発のたびに作り直すと何も追加されないまま止まるため）
+  handleSeeking() {
+    if (this.inBuffer(this.v.currentTime)) { clearTimeout(this.seekTimer); return; }
+    this.stats.seekEvents = (this.stats.seekEvents || 0) + 1;
+    clearTimeout(this.seekTimer);
+    this.seekTimer = setTimeout(() => this.doSeek(), 250);
+  }
+  async doSeek() {
     const t = this.v.currentTime;
-    if (this.inBuffer(t)) { log(`seek ${t.toFixed(1)}s: バッファ内`); return; }
+    if (this.inBuffer(t)) return;
     const tSeek = performance.now();
     this.stats.seeks++;
-    log(`seek ${t.toFixed(1)}s: バッファ外 → 世代切替`);
+    log(`seek ${t.toFixed(1)}s: バッファ外 → 世代切替（合流したseeking=${this.stats.seekEvents}）`);
+    this.stats.seekEvents = 0;
     const myGen = ++this.gen;                       // 手順6(1)
     if (this.curOutput) { this.curOutput.cancel().catch((e) => log('旧Output.cancel: ' + e)); this.curOutput = null; }  // (3) awaitしない
     await this.queue.tail;                          // 旧世代の操作は即resolveされる (2)(4)
@@ -418,6 +432,8 @@ class MsePlayer {
         await this.queue.tail;
         if (this.ms.readyState === 'open') { try { this.ms.endOfStream(); log('endOfStream'); } catch (e) { log('endOfStream: ' + e, 'ng'); } }
         this.stats.state = '供給完了';
+        const s = this.stats;
+        log(`[summary] 供給完了 file=${this.file.name} 追加累計=${fmtMB(s.appended)} 1回の最大成功=${fmtMB(s.maxAppendOK)} 最小失敗=${s.minAppendFail === Infinity ? '-' : fmtMB(s.minAppendFail)} 最大フラグメント=${fmtMB(s.maxFrag)} Quota=${s.quota} ローテーション=${s.rotations} シーク=${s.seeks} slice=${this.o.slice}MiB`);
       }
     } catch (e) {
       if (gen === this.gen) { this.fail('pump例外: ' + (e && e.message)); log(String(e && e.stack), 'ng'); }
