@@ -220,7 +220,8 @@ class MsePlayer {
     this.file = file; this.v = video; this.o = opts;
     this.gen = 0; this.dead = false; this.queue = new OpQueue();
     this.frags = []; this.cur = null; this.curOutput = null;
-    this.stats = { appended: 0, appendCount: 0, maxAppendOK: 0, minAppendFail: Infinity, quota: 0, maxFrag: 0, rotations: 0, outputs: 0, seeks: 0, evicted: 0, pumpMs: 0, packets: 0, state: 'init' };
+    this.resident = 0; this.pending = 0;
+    this.stats = { residentMax: 0, budgetWaits: 0, uaEvictAll: 0, appended: 0, appendCount: 0, maxAppendOK: 0, minAppendFail: Infinity, quota: 0, maxFrag: 0, rotations: 0, outputs: 0, seeks: 0, evicted: 0, pumpMs: 0, packets: 0, state: 'init' };
     this.firstPlayAt = null;
   }
   bufRanges() { return this.sb ? this.sb.buffered : { length: 0 }; }
@@ -265,7 +266,9 @@ class MsePlayer {
     await open;
     this.sb = this.ms.addSourceBuffer(this.mime);
     this.ms.duration = this.duration;
-    this.sb.addEventListener('bufferedchange', () => log('sb:bufferedchange ' + rangesStr(this.sb.buffered)));
+    this.sb.addEventListener('bufferedchange', () => {
+      if (this.sb.buffered.length === 0 && this.resident > 0) { this.stats.uaEvictAll++; log(`UAがバッファを全部追い出した（常駐推定 ${fmtMB(this.resident)} → 0）`, 'warn'); this.resident = 0; }
+    });
     this.sb.addEventListener('error', () => log('sb:error', 'ng'));
     this.onTime = () => this.evict(false);
     this.v.addEventListener('timeupdate', this.onTime);
@@ -314,12 +317,15 @@ class MsePlayer {
       const e = waitEnd(this.sb); this.sb.remove(a, b); await e;
       this.stats.evicted++;
     });
+    let removed = 0; for (const f of this.frags) if (f.t1 <= b && f.bytes) removed += f.bytes;
+    this.resident = Math.max(0, this.resident - removed);
     this.frags = this.frags.filter((f) => f.t1 > b);
   }
   // 計画 手順5：削除の終点は、フラグメント開始時刻のうち currentTime-back 以下で最大のもの
   async evict(force) {
     if (this.evicting || !this.sb || this.sb.buffered.length === 0) return;
-    const back = force ? 2 : this.o.back;
+    const pressure = this.resident > 0.5 * this.o.totalMiB * MB;
+    const back = force ? 2 : (pressure ? 1 : this.o.back);
     const limit = this.v.currentTime - back;
     let end = -1;
     for (const f of this.frags) if (f.t0 <= limit && f.t0 > end) end = f.t0;
@@ -347,6 +353,7 @@ class MsePlayer {
         this.sb.appendBuffer(data);
         await end;
         this.stats.appended += data.byteLength; this.stats.appendCount++;
+        this.resident += data.byteLength; if (this.resident > this.stats.residentMax) this.stats.residentMax = this.resident;
         if (data.byteLength > this.stats.maxAppendOK) this.stats.maxAppendOK = data.byteLength;
         return true;
       } catch (e) {
@@ -395,8 +402,25 @@ class MsePlayer {
       if (gen !== this.gen || this.dead) return;
       const fwd = this.forwardSeconds(), fb = this.forwardBytes();
       const streaming = this.ms.streaming !== false;
-      if (this.queue.depth === 0 && (fwd < 2 || (streaming && fwd < this.o.fwdSec && fb < this.o.fwdMiB * MB))) return;
+      if (this.queue.depth === 0 && (fwd < 2 || (streaming && fwd < this.o.fwdSec))) return;
       await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  // 計画 手順4(c)の修正：キーフレームを書くと、直前までのフラグメント(pending)がフラッシュされて追加される。
+  // その前に「常駐＋pending が総量上限に収まる」まで待つ（収まらないものは追い出しの進行＝再生の進行を待つ）。
+  async waitBudget(gen) {
+    const budget = this.o.totalMiB * MB;
+    let waited = 0;
+    for (;;) {
+      if (gen !== this.gen || this.dead) return;
+      if (this.queue.depth === 0 && this.resident + this.pending <= budget) return;
+      if (this.pending > budget) { this.fail(`1フラグメント(${fmtMB(this.pending)})が総量上限(${this.o.totalMiB}MiB)を超える`); return; }
+      this.stats.budgetWaits++;
+      await this.evict(false);
+      await new Promise((r) => setTimeout(r, 200));
+      waited += 200;
+      if (waited % 5000 === 0) log(`総量待ち ${waited / 1000}秒 常駐=${fmtMB(this.resident)} pending=${fmtMB(this.pending)} ct=${this.v.currentTime.toFixed(1)} buffered=${rangesStr(this.sb.buffered)}`, 'warn');
+      if (waited >= 20000) { this.fail(`総量待ちが20秒を超えた。常駐=${fmtMB(this.resident)} pending=${fmtMB(this.pending)}（GOPが長すぎて、再生中のGOPを残したまま次を入れられない）`); return; }
     }
   }
   async pump(gen, startTime) {
@@ -422,6 +446,8 @@ class MsePlayer {
           c = await this.newOutput(gen); this.cur = c; this.curOutput = c.output; this.stats.rotations++;
           log(`Outputローテーション #${this.stats.rotations} at ${pkt.timestamp.toFixed(1)}s`);
         }
+        if (useV && pkt.type === 'key' && c.t0 !== null) { await this.waitBudget(gen); if (gen !== this.gen || this.dead) break; this.pending = 0; }
+        this.pending += pkt.data.byteLength;
         if (c.t0 === null) c.t0 = pkt.timestamp;
         this.stats.packets++;
         if (useV) { await c.vSrc.add(pkt, c.fv ? { decoderConfig: this.vCfg } : undefined); c.fv = false; vp = await this.vSink.getNextPacket(vp); }
@@ -433,7 +459,7 @@ class MsePlayer {
         if (this.ms.readyState === 'open') { try { this.ms.endOfStream(); log('endOfStream'); } catch (e) { log('endOfStream: ' + e, 'ng'); } }
         this.stats.state = '供給完了';
         const s = this.stats;
-        log(`[summary] 供給完了 file=${this.file.name} 追加累計=${fmtMB(s.appended)} 1回の最大成功=${fmtMB(s.maxAppendOK)} 最小失敗=${s.minAppendFail === Infinity ? '-' : fmtMB(s.minAppendFail)} 最大フラグメント=${fmtMB(s.maxFrag)} Quota=${s.quota} ローテーション=${s.rotations} シーク=${s.seeks} slice=${this.o.slice}MiB`);
+        log(`[summary] 供給完了 file=${this.file.name} 追加累計=${fmtMB(s.appended)} 1回の最大成功=${fmtMB(s.maxAppendOK)} 最小失敗=${s.minAppendFail === Infinity ? '-' : fmtMB(s.minAppendFail)} 最大フラグメント=${fmtMB(s.maxFrag)} Quota=${s.quota} ローテーション=${s.rotations} シーク=${s.seeks} slice=${this.o.slice}MiB 総量=${this.o.totalMiB}MiB 常駐最大=${fmtMB(s.residentMax)} 総量待ち=${s.budgetWaits} UA全追い出し=${s.uaEvictAll}`);
       }
     } catch (e) {
       if (gen === this.gen) { this.fail('pump例外: ' + (e && e.message)); log(String(e && e.stack), 'ng'); }
@@ -458,7 +484,7 @@ $('btnMse').addEventListener('click', async () => {
   if (!MSClass) { log('MediaSource も ManagedMediaSource も無い', 'ng'); return; }
   stopMse();
   if (nativeUrl) { URL.revokeObjectURL(nativeUrl); nativeUrl = null; }
-  const o = { fwdSec: Number($('oFwdSec').value), fwdMiB: Number($('oFwdMiB').value), back: Number($('oBack').value), rot: Number($('oRot').value), frag: Number($('oFrag').value), slice: Number($('oSlice').value) };
+  const o = { fwdSec: Number($('oFwdSec').value), fwdMiB: Number($('oFwdMiB').value), back: Number($('oBack').value), rot: Number($('oRot').value), frag: Number($('oFrag').value), slice: Number($('oSlice').value), totalMiB: Number($('oTotal').value) };
   log(`MSE開始 ${S.video.name} opts=${JSON.stringify(o)} class=${MSClass === window.ManagedMediaSource ? 'ManagedMediaSource' : 'MediaSource'}`);
   const p = new MsePlayer(S.video, v, o); mse = p;
   try { await p.init(); p.start().then(() => { }, (e) => log('pump error: ' + e, 'ng')); }
@@ -471,6 +497,7 @@ setInterval(() => {
     `状態: ${s.state}  MS.readyState=${mse.ms.readyState} streaming=${mse.ms.streaming} sb.updating=${mse.sb.updating} queue=${mse.queue.depth}\n` +
     `ct=${v.currentTime.toFixed(1)} 先読み=${mse.forwardSeconds().toFixed(1)}秒 / 前方推定=${fmtMB(mse.forwardBytes())}\n` +
     `buffered=${rangesStr(mse.sb.buffered)}\n` +
+    `常駐推定=${fmtMB(mse.resident)} (最大 ${fmtMB(s.residentMax)}) pending=${fmtMB(mse.pending)} 総量待ち=${s.budgetWaits}回 UA全追い出し=${s.uaEvictAll}回\n` +
     `追加累計=${fmtMB(s.appended)} (${s.appendCount}回) 1回の追加の最大成功=${fmtMB(s.maxAppendOK)} 最小失敗=${s.minAppendFail === Infinity ? '-' : fmtMB(s.minAppendFail)} 最大フラグメント=${fmtMB(s.maxFrag)} 保持フラグメント数=${mse.frags.length}\n` +
     `Output数=${s.outputs} ローテーション=${s.rotations} シーク(バッファ外)=${s.seeks} 削除=${s.evicted}回 Quota=${s.quota} パケット=${s.packets}`;
 }, 500);
@@ -479,5 +506,5 @@ $('btnCopy').addEventListener('click', async () => { try { await navigator.clipb
 $('btnClear').addEventListener('click', () => { $('log').textContent = ''; logLines.length = 0; });
 
 // 自動テスト用のフック（デスクトップのブラウザでの動作確認に使う）
-window.__spike = { S, log, startMse: (file, opts) => { S.video = file; return (async () => { stopMse(); const o = Object.assign({ fwdSec: 30, fwdMiB: 64, back: 15, rot: 300, frag: 2, slice: 4 }, opts || {}); const p = new MsePlayer(file, v, o); mse = p; await p.init(); p.start(); return p; })(); }, get mse() { return mse; } };
+window.__spike = { S, log, startMse: (file, opts) => { S.video = file; return (async () => { stopMse(); const o = Object.assign({ fwdSec: 30, fwdMiB: 64, back: 15, rot: 300, frag: 2, slice: 4, totalMiB: 80 }, opts || {}); const p = new MsePlayer(file, v, o); mse = p; await p.init(); p.start(); return p; })(); }, get mse() { return mse; } };
 log('スパイクページを読み込みました。UA=' + navigator.userAgent);

@@ -54,6 +54,7 @@
   <label>回転秒 <input type="number" id="oRot" value="300"></label>
   <label>断片秒 <input type="number" id="oFrag" value="2"></label>
   <label>分割MiB <input type="number" id="oSlice" value="4"></label>
+  <label>総量MiB <input type="number" id="oTotal" value="80"></label>
 </div>
 <div class="row"><button id="btnMse">MSEで読み込む（上の video に出ます）</button><button id="btnMseStop">停止・破棄</button></div>
 <div class="note">読み込み後に、上の video の再生ボタンを押してください（自動再生はしません）。シーク・倍速・長時間再生を試し、診断欄とログを見ます。</div>
@@ -63,6 +64,6 @@
 <div class="row"><button id="btnCopy">ログをコピー</button><button id="btnClear">クリア</button></div>
 <pre id="log"></pre>
 
-<script type="module" src="./spike.js?v=6"></script>
+<script type="module" src="./spike.js?v=7"></script>
 </body>
 </html>
