@@ -215,7 +215,7 @@ class MsePlayer {
     this.file = file; this.v = video; this.o = opts;
     this.gen = 0; this.dead = false; this.queue = new OpQueue();
     this.frags = []; this.cur = null; this.curOutput = null;
-    this.stats = { appended: 0, appendCount: 0, quota: 0, maxFrag: 0, rotations: 0, outputs: 0, seeks: 0, evicted: 0, pumpMs: 0, packets: 0, state: 'init' };
+    this.stats = { appended: 0, appendCount: 0, maxAppendOK: 0, minAppendFail: Infinity, quota: 0, maxFrag: 0, rotations: 0, outputs: 0, seeks: 0, evicted: 0, pumpMs: 0, packets: 0, state: 'init' };
     this.firstPlayAt = null;
   }
   bufRanges() { return this.sb ? this.sb.buffered : { length: 0 }; }
@@ -287,8 +287,11 @@ class MsePlayer {
     } catch (e) { log('seek reset error: ' + e, 'ng'); }
     this.frags = [];
     this.pump(myGen, t).then(() => { }, (e) => log('pump error: ' + (e && e.stack || e), 'ng'));
-    const onPl = () => { log(`seek→playing ${(performance.now() - tSeek).toFixed(0)}ms`); this.v.removeEventListener('playing', onPl); };
-    this.v.addEventListener('playing', onPl);
+    if (!this.seekT0) {
+      this.seekT0 = tSeek;
+      const onPl = () => { log(`seek→playing ${(performance.now() - this.seekT0).toFixed(0)}ms`); this.seekT0 = 0; this.v.removeEventListener('playing', onPl); };
+      this.v.addEventListener('playing', onPl);
+    }
   }
   async removeRange(a, b) {
     if (!(b > a)) return;
@@ -311,21 +314,33 @@ class MsePlayer {
     this.evicting = true;
     try { await this.removeRange(start0, end); } finally { this.evicting = false; }
   }
+  // 計画 手順2：チャンクは slice MiB ごとに分けて appendBuffer する（0なら分割しない）。
+  // iPhoneで、空のSourceBufferへの 24.9MB の1回の追加が QuotaExceededError になったため（U11）。
   async appendOp(data, gen) {
+    const step = this.o.slice > 0 ? Math.max(1, Math.floor(this.o.slice * MB)) : (data.byteLength || 1);
+    for (let off = 0; off < data.byteLength; off += step) {
+      const part = step >= data.byteLength ? data : data.subarray(off, Math.min(off + step, data.byteLength));
+      const ok = await this.appendPart(part, gen);
+      if (!ok) return;
+    }
+  }
+  async appendPart(data, gen) {
     for (let attempt = 0; ; attempt++) {
-      if (gen !== this.gen || this.dead) return;
+      if (gen !== this.gen || this.dead) return false;
       while (this.sb.updating) await waitEnd(this.sb);
       try {
         const end = waitEnd(this.sb);
         this.sb.appendBuffer(data);
         await end;
         this.stats.appended += data.byteLength; this.stats.appendCount++;
-        return;
+        if (data.byteLength > this.stats.maxAppendOK) this.stats.maxAppendOK = data.byteLength;
+        return true;
       } catch (e) {
         if (e && e.name === 'QuotaExceededError') {
           this.stats.quota++;
-          log(`QuotaExceededError: chunk=${fmtMB(data.byteLength)} buffered=${rangesStr(this.sb.buffered)} 保持推定=${fmtMB(this.forwardBytes())} 試行${attempt + 1}`, 'ng');
-          if (attempt >= 3) { this.fail('QuotaExceededError が解消しない（4.4節 U11）'); return; }
+          if (data.byteLength < this.stats.minAppendFail) this.stats.minAppendFail = data.byteLength;
+          log(`QuotaExceededError: 追加=${fmtMB(data.byteLength)} buffered=${rangesStr(this.sb.buffered)} 保持推定=${fmtMB(this.forwardBytes())} 試行${attempt + 1}（これまでの最大成功=${fmtMB(this.stats.maxAppendOK)}）`, 'ng');
+          if (attempt >= 3) { this.fail('QuotaExceededError が解消しない（4.4節 U11）。分割MiBを小さくして再試行'); return false; }
           this.evicting = false; await this.evict(true);
           continue;
         }
@@ -427,7 +442,7 @@ $('btnMse').addEventListener('click', async () => {
   if (!MSClass) { log('MediaSource も ManagedMediaSource も無い', 'ng'); return; }
   stopMse();
   if (nativeUrl) { URL.revokeObjectURL(nativeUrl); nativeUrl = null; }
-  const o = { fwdSec: Number($('oFwdSec').value), fwdMiB: Number($('oFwdMiB').value), back: Number($('oBack').value), rot: Number($('oRot').value), frag: Number($('oFrag').value) };
+  const o = { fwdSec: Number($('oFwdSec').value), fwdMiB: Number($('oFwdMiB').value), back: Number($('oBack').value), rot: Number($('oRot').value), frag: Number($('oFrag').value), slice: Number($('oSlice').value) };
   log(`MSE開始 ${S.video.name} opts=${JSON.stringify(o)} class=${MSClass === window.ManagedMediaSource ? 'ManagedMediaSource' : 'MediaSource'}`);
   const p = new MsePlayer(S.video, v, o); mse = p;
   try { await p.init(); p.start().then(() => { }, (e) => log('pump error: ' + e, 'ng')); }
@@ -440,7 +455,7 @@ setInterval(() => {
     `状態: ${s.state}  MS.readyState=${mse.ms.readyState} streaming=${mse.ms.streaming} sb.updating=${mse.sb.updating} queue=${mse.queue.depth}\n` +
     `ct=${v.currentTime.toFixed(1)} 先読み=${mse.forwardSeconds().toFixed(1)}秒 / 前方推定=${fmtMB(mse.forwardBytes())}\n` +
     `buffered=${rangesStr(mse.sb.buffered)}\n` +
-    `追加累計=${fmtMB(s.appended)} (${s.appendCount}回) 最大フラグメント=${fmtMB(s.maxFrag)} 保持フラグメント数=${mse.frags.length}\n` +
+    `追加累計=${fmtMB(s.appended)} (${s.appendCount}回) 1回の追加の最大成功=${fmtMB(s.maxAppendOK)} 最小失敗=${s.minAppendFail === Infinity ? '-' : fmtMB(s.minAppendFail)} 最大フラグメント=${fmtMB(s.maxFrag)} 保持フラグメント数=${mse.frags.length}\n` +
     `Output数=${s.outputs} ローテーション=${s.rotations} シーク(バッファ外)=${s.seeks} 削除=${s.evicted}回 Quota=${s.quota} パケット=${s.packets}`;
 }, 500);
 
@@ -448,5 +463,5 @@ $('btnCopy').addEventListener('click', async () => { try { await navigator.clipb
 $('btnClear').addEventListener('click', () => { $('log').textContent = ''; logLines.length = 0; });
 
 // 自動テスト用のフック（デスクトップのブラウザでの動作確認に使う）
-window.__spike = { S, log, startMse: (file, opts) => { S.video = file; return (async () => { stopMse(); const o = Object.assign({ fwdSec: 30, fwdMiB: 64, back: 15, rot: 300, frag: 2 }, opts || {}); const p = new MsePlayer(file, v, o); mse = p; await p.init(); p.start(); return p; })(); }, get mse() { return mse; } };
+window.__spike = { S, log, startMse: (file, opts) => { S.video = file; return (async () => { stopMse(); const o = Object.assign({ fwdSec: 30, fwdMiB: 64, back: 15, rot: 300, frag: 2, slice: 4 }, opts || {}); const p = new MsePlayer(file, v, o); mse = p; await p.init(); p.start(); return p; })(); }, get mse() { return mse; } };
 log('スパイクページを読み込みました。UA=' + navigator.userAgent);
