@@ -193,8 +193,7 @@ $('btnProbe').addEventListener('click', async () => {
     s += `先頭パケット: type=${first.type} ts=${first.timestamp}\n`;
     input.dispose();
   } catch (e) { s += 'エラー: ' + (e.stack || e); }
-  $('types').textContent = s; for (const l of s.split('
-')) if (l) log('[probe] ' + l);
+  $('types').textContent = s; for (const l of s.split('\n')) if (l) log('[probe] ' + l);
 });
 
 // ---- 直列キュー（計画 5.3節 手順3） ----
