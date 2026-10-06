@@ -236,7 +236,10 @@ class MsePlayer {
     this.vSink = new EncodedPacketSink(vTrack); this.aSink = aTrack ? new EncodedPacketSink(aTrack) : null;
     this.vCfg = await vTrack.getDecoderConfig(); this.aCfg = aTrack ? await aTrack.getDecoderConfig() : null;
     const vc = await vTrack.getCodecParameterString(), ac = aTrack ? await aTrack.getCodecParameterString() : null;
-    this.mime = `video/mp4; codecs="${vc}${ac ? ', ' + ac : ''}"`;
+    // MP4内のOpusの正式なコーデック文字列は先頭大文字の "Opus"。iPhone(Safari 26.6.1)の ManagedMediaSource は、
+    // MediabunnyがWebCodecs表記で返す小文字の "opus" を偽にする（実測）。そこで "Opus" に直した文字列を使う。
+    const acMime = ac === 'opus' ? 'Opus' : ac;
+    this.mime = `video/mp4; codecs="${vc}${acMime ? ', ' + acMime : ''}"`;
     log('MSE MIME: ' + this.mime);
     const ok = MSClass.isTypeSupported(this.mime);
     log(`isTypeSupported=${ok}`, ok ? 'ok' : 'ng');
