@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Phase 0 スパイク（使い捨て）</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif; margin: 0; padding: 12px 14px 80px; }
+  h1 { font-size: 18px; margin: 4px 0 2px; }
+  h2 { font-size: 16px; margin: 22px 0 6px; border-bottom: 1px solid #8884; padding-bottom: 4px; }
+  .note { color: #888; font-size: 12.5px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  label.pick { display: block; margin: 8px 0 2px; font-weight: 600; font-size: 13.5px; }
+  button, select, input[type=number] { font-size: 15px; padding: 7px 12px; }
+  input[type=number] { width: 72px; }
+  video { width: 100%; background: #000; max-height: 42vh; }
+  pre { background: #8881; border: 1px solid #8883; border-radius: 6px; padding: 8px; overflow: auto; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; margin: 6px 0; }
+  #log { max-height: 280px; }
+  .ok { color: #2a9d4b; } .ng { color: #d9534f; } .warn { color: #d98f1e; }
+  table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+  td, th { border-bottom: 1px solid #8883; padding: 3px 5px; text-align: left; vertical-align: top; word-break: break-all; }
+  .opt label { font-size: 12.5px; margin-right: 10px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<h1>Phase 0 スパイク（使い捨て）</h1>
+<div class="note">Issue #1 の計画書 8節 S1・S2。このページは検証用で、本実装には持ち込みません。ログは画面下と localStorage に残ります。</div>
+<pre id="prev"></pre>
+
+<h2>S1-a ファイル選択（U1）</h2>
+<div class="note">各ボタンでファイルを選び、表に出る 名前・サイズ・type・先頭バイト を確認します。<b>「ファイル」アプリから選んだ場合</b>と<b>写真ライブラリから選んだ場合</b>の両方を、同じ動画で試してください（サイズや先頭バイトが変わるか）。</div>
+<div id="pickers"></div>
+<div id="pickinfo"></div>
+
+<h2>S1-b ネイティブ再生（U2・U9）</h2>
+<div class="note">選んだ動画（拡張子が mp4/mov/webm/mkv のもの）を <code>URL.createObjectURL(file)</code> で再生します。</div>
+<div class="row">
+  <button id="btnNative">ネイティブ再生</button>
+  <button id="btnRevoke">URL解放・停止</button>
+  <label>速度 <select id="rate"><option>0.5</option><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option><option>1.75</option><option>2</option></select></label>
+</div>
+
+<video id="v" controls playsinline></video>
+<pre id="vstat"></pre>
+
+<h2>S2 MKVのMSE再生（U3〜U7・U10・U11）</h2>
+<div class="row"><button id="btnTypes">isTypeSupported 一覧</button><button id="btnProbe">トラックとGOPを調べる</button></div>
+<pre id="types"></pre>
+<div class="opt row">
+  <label>先読み秒 <input type="number" id="oFwdSec" value="30"></label>
+  <label>先読みMiB <input type="number" id="oFwdMiB" value="64"></label>
+  <label>後方秒 <input type="number" id="oBack" value="15"></label>
+  <label>回転秒 <input type="number" id="oRot" value="300"></label>
+  <label>断片秒 <input type="number" id="oFrag" value="2"></label>
+</div>
+<div class="row"><button id="btnMse">MSEで読み込む（上の video に出ます）</button><button id="btnMseStop">停止・破棄</button></div>
+<div class="note">読み込み後に、上の video の再生ボタンを押してください（自動再生はしません）。シーク・倍速・長時間再生を試し、診断欄とログを見ます。</div>
+<pre id="mstat"></pre>
+
+<h2>ログ</h2>
+<div class="row"><button id="btnCopy">ログをコピー</button><button id="btnClear">クリア</button></div>
+<pre id="log"></pre>
+
+<script type="module" src="./spike.js"></script>
+</body>
+</html>
