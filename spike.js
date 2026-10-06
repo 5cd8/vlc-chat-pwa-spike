@@ -126,26 +126,35 @@ setInterval(() => {
 
 // ---------------- S2 MSE ----------------
 const MSClass = window.ManagedMediaSource || window.MediaSource;
-$('btnTypes').addEventListener('click', () => {
-  const types = [
-    'video/mp4; codecs="avc1.640028, mp4a.40.2"',
-    'video/mp4; codecs="avc1.640028, opus"',
-    'video/mp4; codecs="vp09.00.40.08, opus"',
-    'video/mp4; codecs="vp09.00.10.08, opus"',
-    'video/mp4; codecs="av01.0.08M.08, opus"',
-    'video/mp4; codecs="av01.0.12M.08, opus"',
-    'video/webm; codecs="vp9, opus"',
-    'video/webm; codecs="vp8, vorbis"',
-    'video/webm; codecs="av01.0.08M.08, opus"',
-  ];
+const TYPE_LIST = [
+  // 映像のみ（音声が原因かを切り分ける）
+  'video/mp4; codecs="avc1.42c028"', 'video/mp4; codecs="avc1.640028"', 'video/mp4; codecs="avc1.4d4028"',
+  'video/mp4; codecs="vp09.00.40.08"', 'video/mp4; codecs="vp09.00.10.08"', 'video/mp4; codecs="av01.0.08M.08"', 'video/mp4; codecs="av01.0.12M.08"',
+  // 音声のみ
+  'audio/mp4; codecs="mp4a.40.2"', 'audio/mp4; codecs="opus"', 'audio/mp4; codecs="Opus"', 'audio/webm; codecs="opus"', 'audio/webm; codecs="vorbis"',
+  // 映像＋音声（mp4）
+  'video/mp4; codecs="avc1.640028, mp4a.40.2"', 'video/mp4; codecs="avc1.42c028, opus"', 'video/mp4; codecs="avc1.640028, opus"',
+  'video/mp4; codecs="vp09.00.40.08, opus"', 'video/mp4; codecs="av01.0.08M.08, opus"',
+  'video/mp4; codecs="vp09.00.40.08, mp4a.40.2"', 'video/mp4; codecs="av01.0.08M.08, mp4a.40.2"',
+  // WebM
+  'video/webm; codecs="vp9, opus"', 'video/webm; codecs="vp09.00.40.08, opus"', 'video/webm; codecs="av01.0.08M.08, opus"', 'video/webm; codecs="vp8, vorbis"',
+];
+function typesReport() {
   let s = `ManagedMediaSource: ${!!window.ManagedMediaSource}  MediaSource: ${!!window.MediaSource}  WebCodecs(VideoDecoder): ${!!window.VideoDecoder}\n`;
-  s += `video.canPlayType の結果も併記（ネイティブ再生側）\n`;
-  for (const t of types) {
+  const lines = [s.trim()];
+  for (const t of TYPE_LIST) {
     const m = window.ManagedMediaSource ? window.ManagedMediaSource.isTypeSupported(t) : null;
     const n = window.MediaSource ? window.MediaSource.isTypeSupported(t) : null;
-    s += `${t}\n   MMS=${m}  MS=${n}  canPlayType=${document.createElement('video').canPlayType(t) || '(空)'}\n`;
+    const c = document.createElement('video').canPlayType(t) || '(空)';
+    const line = `${t}  MMS=${m} MS=${n} canPlay=${c}`;
+    lines.push(line); s += line + '\n';
   }
-  $('types').textContent = s; log('isTypeSupported 一覧を表示');
+  return { s, lines };
+}
+$('btnTypes').addEventListener('click', () => {
+  const r = typesReport();
+  $('types').textContent = r.s;
+  for (const l of r.lines) log('[types] ' + l);
 });
 
 async function openInput(file) {
@@ -184,7 +193,8 @@ $('btnProbe').addEventListener('click', async () => {
     s += `先頭パケット: type=${first.type} ts=${first.timestamp}\n`;
     input.dispose();
   } catch (e) { s += 'エラー: ' + (e.stack || e); }
-  $('types').textContent = s; log('トラックとGOPの調査を表示');
+  $('types').textContent = s; for (const l of s.split('
+')) if (l) log('[probe] ' + l);
 });
 
 // ---- 直列キュー（計画 5.3節 手順3） ----
@@ -231,7 +241,11 @@ class MsePlayer {
     log('MSE MIME: ' + this.mime);
     const ok = MSClass.isTypeSupported(this.mime);
     log(`isTypeSupported=${ok}`, ok ? 'ok' : 'ng');
-    if (!ok) throw new Error('isTypeSupported が偽: ' + this.mime);
+    if (!ok) {
+      const alts = [`video/mp4; codecs="${vc}"`, ac ? `audio/mp4; codecs="${ac}"` : null, `video/mp4; codecs="${vc}, mp4a.40.2"`].filter(Boolean);
+      for (const a of alts) log(`  切り分け: ${a} → MSClass=${MSClass.isTypeSupported(a)} MS=${window.MediaSource ? window.MediaSource.isTypeSupported(a) : null}`, 'warn');
+      throw new Error('isTypeSupported が偽: ' + this.mime);
+    }
     this.duration = await input.getDurationFromMetadata();
     log('duration(metadata)=' + this.duration, this.duration == null ? 'warn' : undefined);
     if (this.duration == null) this.duration = await input.computeDuration();
